@@ -1,10 +1,8 @@
-# --- Cloud fallback v0.5.3 ----------------------------------------------------
-# Conserva EXACTAMENTE la URL remota activa del DEM.
-# 1) Intenta lectura aleatoria GDAL /vsicurl/.
-# 2) Si la URL entrega una pagina HTML/intersticial a GDAL, usa gdown sobre
-#    LA MISMA URL directa para resolver la descarga del mismo archivo.
-# 3) Guarda el GeoTIFF en cache efimera del contenedor y lo reutiliza.
-APP_VERSION <- "0.5.4"
+# --- Cloud fallback v0.5.5 ----------------------------------------------------
+# Conserva EXACTAMENTE la URL remota activa del DEM para la lectura primaria.
+# Si /vsicurl/ recibe HTML, extrae el file ID de ESA MISMA URL y usa gdown
+# por ID para descargar el mismo archivo a cache efimera del contenedor.
+APP_VERSION <- "0.5.5"
 
 get_remote_cache_path <- function() {
   cache_dir <- trimws(Sys.getenv(
@@ -19,7 +17,7 @@ get_remote_cache_path <- function() {
 is_tiff_file <- function(path) {
   if (!file.exists(path)) return(FALSE)
   size <- file.info(path)$size
-  if (!is.finite(size) || size < 100 * 1024^2) return(FALSE)
+  if (!is.finite(size) || size < 1024^3) return(FALSE)
 
   con <- file(path, open = "rb")
   on.exit(close(con), add = TRUE)
@@ -27,6 +25,23 @@ is_tiff_file <- function(path) {
   if (length(sig) < 4L) return(FALSE)
   hex <- paste(sprintf("%02X", as.integer(sig)), collapse = " ")
   hex %in% c("49 49 2A 00", "4D 4D 00 2A", "49 49 2B 00", "4D 4D 00 2B")
+}
+
+extract_drive_file_id <- function(url) {
+  m <- regexec("[?&]id=([^&]+)", url, perl = TRUE)
+  hit <- regmatches(url, m)[[1]]
+  if (length(hit) >= 2L && nzchar(hit[[2]])) {
+    return(utils::URLdecode(hit[[2]]))
+  }
+
+  # Compatibilidad adicional con /file/d/FILE_ID/ si en el futuro la URL cambia.
+  m2 <- regexec("/file/d/([^/?&]+)", url, perl = TRUE)
+  hit2 <- regmatches(url, m2)[[1]]
+  if (length(hit2) >= 2L && nzchar(hit2[[2]])) {
+    return(hit2[[2]])
+  }
+
+  ""
 }
 
 download_remote_dem_cache <- function() {
@@ -61,36 +76,62 @@ download_remote_dem_cache <- function() {
     )
   }
 
+  remote_url <- get_remote_url()
+  drive_id <- extract_drive_file_id(remote_url)
+
+  if (!nzchar(drive_id)) {
+    stop_dem(
+      "No fue posible extraer el identificador del archivo desde la URL directa configurada del MDE.",
+      503
+    )
+  }
+
   message(
     "/vsicurl/ no pudo abrir la URL directa del MDE. ",
-    "Se intentara descargar EL MISMO archivo con gdown a cache temporal: ",
+    "Se descargara EL MISMO archivo usando el file ID extraido de esa URL: ",
+    drive_id,
+    " | cache temporal: ",
     dest
   )
 
-  cmd_out <- tryCatch(
-    system2(
-      command = gdown_bin,
-      args = c(
-        "--quiet",
-        "-O", shQuote(part),
-        shQuote(get_remote_url())
-      ),
-      stdout = TRUE,
-      stderr = TRUE
-    ),
-    error = function(e) structure(
-      paste("Error ejecutando gdown:", conditionMessage(e)),
-      status = 1L
-    )
-  )
+  cmd_out <- character()
+  exit_status <- 1L
 
-  exit_status <- attr(cmd_out, "status")
-  if (is.null(exit_status)) exit_status <- 0L
+  for (attempt in seq_len(3L)) {
+    cmd_out <- tryCatch(
+      system2(
+        command = gdown_bin,
+        args = c(
+          "--quiet",
+          "--continue",
+          "-O", shQuote(part),
+          shQuote(drive_id)
+        ),
+        stdout = TRUE,
+        stderr = TRUE
+      ),
+      error = function(e) structure(
+        paste("Error ejecutando gdown:", conditionMessage(e)),
+        status = 1L
+      )
+    )
+
+    exit_status <- attr(cmd_out, "status")
+    if (is.null(exit_status)) exit_status <- 0L
+
+    if (exit_status == 0L && is_tiff_file(part)) break
+
+    message(
+      "Intento gdown ", attempt, "/3 no produjo aun un GeoTIFF completo. ",
+      "exit=", exit_status,
+      " | bytes=", if (file.exists(part)) file.info(part)$size else 0
+    )
+  }
 
   if (exit_status != 0L || !is_tiff_file(part)) {
     size_part <- if (file.exists(part)) file.info(part)$size else 0
     tail_log <- if (length(cmd_out)) {
-      paste(tail(cmd_out, 8), collapse = " | ")
+      paste(tail(cmd_out, 12), collapse = " | ")
     } else {
       "sin salida adicional"
     }
@@ -100,10 +141,11 @@ download_remote_dem_cache <- function() {
     stop_dem(
       paste0(
         "La URL directa del MDE no pudo resolverse como GeoTIFF desde Railway. ",
+        "Se uso el file ID extraido de la misma URL. ",
         "gdown exit=", exit_status,
         "; bytes recibidos=", size_part,
         ". Detalle: ", tail_log,
-        ". Se mantiene exactamente la misma URL remota configurada."
+        ". Se mantiene exactamente la misma fuente remota configurada."
       ),
       503
     )
@@ -115,7 +157,7 @@ download_remote_dem_cache <- function() {
   }
 
   message(
-    "MDE remoto descargado correctamente desde la URL directa configurada. Cache: ",
+    "MDE remoto descargado correctamente desde el mismo archivo configurado. Cache: ",
     dest,
     " | bytes: ",
     file.info(dest)$size
@@ -160,7 +202,7 @@ get_dem <- function(force_local = FALSE) {
           if (is.character(cached) && length(cached) == 1L && file.exists(cached)) {
             warning(
               "No fue posible abrir el DEM por /vsicurl/. Se usara una copia temporal ",
-              "del MISMO GeoTIFF descargado desde la URL directa configurada. ",
+              "del MISMO GeoTIFF descargado usando el file ID de la URL directa configurada. ",
               "Detalle /vsicurl/: ", remote_error
             )
             return(list(dem = open_dem_source(cached), path = cached))
@@ -183,7 +225,7 @@ get_dem <- function(force_local = FALSE) {
           stop_dem(
             paste0(
               "El servicio no pudo abrir el MDE por lectura remota ni descargar una copia temporal ",
-              "desde la misma URL directa configurada. Detalle /vsicurl/: ", remote_error,
+              "del mismo archivo configurado. Detalle /vsicurl/: ", remote_error,
               ". Detalle de cache: ", cache_detail
             ),
             503
@@ -198,4 +240,4 @@ get_dem <- function(force_local = FALSE) {
 
   get(cache_name, envir = .dem_cache, inherits = FALSE)
 }
-# --- end Cloud fallback v0.5.3 -----------------------------------------------
+# --- end Cloud fallback v0.5.5 -----------------------------------------------
