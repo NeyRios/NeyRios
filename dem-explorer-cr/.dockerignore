@@ -1,0 +1,6 @@
+.git
+.Rproj.user
+.Rhistory
+.RData
+outputs/*
+*.zip
