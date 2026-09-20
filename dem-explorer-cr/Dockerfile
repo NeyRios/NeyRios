@@ -5,7 +5,7 @@ RUN apt-get update &&     apt-get install -y --no-install-recommends unzip coreu
 RUN R -q -e "install.packages(c('plumber','jsonlite','png'), repos='https://cloud.r-project.org')"
 
 WORKDIR /src
-COPY archive /src/archive
+COPY dem-explorer-cr/archive /src/archive
 
 RUN cat /src/archive/chunk*.b64 > /src/app.b64 &&     base64 -d /src/app.b64 > /src/app.zip &&     mkdir -p /tmp/appzip /app &&     unzip -q /src/app.zip -d /tmp/appzip &&     cp -a /tmp/appzip/dem_explorer_cr/. /app/ &&     mkdir -p /app/outputs
 
