@@ -2,7 +2,7 @@ FROM rocker/geospatial:latest
 
 RUN apt-get update &&     apt-get install -y --no-install-recommends       unzip       coreutils       libsodium-dev       python3       python3-venv &&     rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m venv /opt/gdown &&     /opt/gdown/bin/pip install --no-cache-dir --upgrade pip gdown
+RUN python3 -m venv /opt/gdown &&     /opt/gdown/bin/pip install --no-cache-dir --upgrade pip gdown awscli
 
 RUN R -q -e "install.packages(c('sodium','plumber','jsonlite','png'), repos='https://cloud.r-project.org'); stopifnot(requireNamespace('sodium', quietly=TRUE), requireNamespace('plumber', quietly=TRUE), requireNamespace('jsonlite', quietly=TRUE), requireNamespace('png', quietly=TRUE))"
 
