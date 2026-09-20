@@ -1,8 +1,11 @@
-# --- Cloud fallback v0.5.5 ----------------------------------------------------
-# Conserva EXACTAMENTE la URL remota activa del DEM para la lectura primaria.
-# Si /vsicurl/ recibe HTML, extrae el file ID de ESA MISMA URL y usa gdown
-# por ID para descargar el mismo archivo a cache efimera del contenedor.
-APP_VERSION <- "0.5.5"
+# --- Cloud storage v0.5.6 ----------------------------------------------------
+# Preferencia operativa:
+# 1) Railway Bucket privado (misma copia operacional del MDE)
+# 2) URL remota directa validada mediante /vsicurl/
+# 3) gdown sobre el file ID extraido de la MISMA URL remota
+#
+# La fuente cientifica no cambia: MDE IGN 2017, 10 m, EPSG:5367.
+APP_VERSION <- "0.5.6"
 
 get_remote_cache_path <- function() {
   cache_dir <- trimws(Sys.getenv(
@@ -27,6 +30,82 @@ is_tiff_file <- function(path) {
   hex %in% c("49 49 2A 00", "4D 4D 00 2A", "49 49 2B 00", "4D 4D 00 2B")
 }
 
+bucket_configured <- function() {
+  all(nzchar(c(
+    Sys.getenv("DEM_BUCKET_NAME", unset = ""),
+    Sys.getenv("DEM_BUCKET_ENDPOINT", unset = ""),
+    Sys.getenv("DEM_BUCKET_KEY", unset = ""),
+    Sys.getenv("AWS_ACCESS_KEY_ID", unset = ""),
+    Sys.getenv("AWS_SECRET_ACCESS_KEY", unset = "")
+  )))
+}
+
+download_bucket_dem_cache <- function() {
+  if (!bucket_configured()) {
+    stop("Railway Bucket no configurado.")
+  }
+
+  dest <- get_remote_cache_path()
+  if (is_tiff_file(dest)) return(dest)
+
+  aws_bin <- Sys.getenv("AWS_BIN", unset = "/opt/gdown/bin/aws")
+  if (!file.exists(aws_bin)) stop("AWS CLI no disponible en el contenedor.")
+
+  part <- paste0(dest, ".bucket.part")
+  unlink(part, force = TRUE)
+
+  bucket <- Sys.getenv("DEM_BUCKET_NAME")
+  endpoint <- Sys.getenv("DEM_BUCKET_ENDPOINT")
+  key <- Sys.getenv("DEM_BUCKET_KEY")
+  region <- Sys.getenv("AWS_DEFAULT_REGION", unset = "auto")
+
+  args <- c(
+    "s3", "cp",
+    shQuote(paste0("s3://", bucket, "/", key)),
+    shQuote(part),
+    "--endpoint-url", shQuote(endpoint),
+    "--region", shQuote(region),
+    "--no-progress"
+  )
+
+  message(
+    "Intentando obtener el MDE desde Railway Bucket: s3://",
+    bucket, "/", key
+  )
+
+  out <- tryCatch(
+    system2(aws_bin, args = args, stdout = TRUE, stderr = TRUE),
+    error = function(e) structure(conditionMessage(e), status = 1L)
+  )
+
+  status <- attr(out, "status")
+  if (is.null(status)) status <- 0L
+
+  if (status != 0L || !is_tiff_file(part)) {
+    bytes <- if (file.exists(part)) file.info(part)$size else 0
+    unlink(part, force = TRUE)
+    stop(
+      paste0(
+        "Railway Bucket no contiene aun un GeoTIFF valido en la clave configurada. ",
+        "exit=", status, "; bytes=", bytes,
+        if (length(out)) paste0("; detalle=", paste(tail(out, 8), collapse = " | ")) else ""
+      )
+    )
+  }
+
+  if (!file.rename(part, dest)) {
+    unlink(part, force = TRUE)
+    stop("No fue posible finalizar la cache local del MDE descargado del Railway Bucket.")
+  }
+
+  message(
+    "MDE obtenido correctamente desde Railway Bucket. bytes=",
+    file.info(dest)$size
+  )
+
+  dest
+}
+
 extract_drive_file_id <- function(url) {
   m <- regexec("[?&]id=([^&]+)", url, perl = TRUE)
   hit <- regmatches(url, m)[[1]]
@@ -34,12 +113,9 @@ extract_drive_file_id <- function(url) {
     return(utils::URLdecode(hit[[2]]))
   }
 
-  # Compatibilidad adicional con /file/d/FILE_ID/ si en el futuro la URL cambia.
   m2 <- regexec("/file/d/([^/?&]+)", url, perl = TRUE)
   hit2 <- regmatches(url, m2)[[1]]
-  if (length(hit2) >= 2L && nzchar(hit2[[2]])) {
-    return(hit2[[2]])
-  }
+  if (length(hit2) >= 2L && nzchar(hit2[[2]])) return(hit2[[2]])
 
   ""
 }
@@ -70,10 +146,7 @@ download_remote_dem_cache <- function() {
 
   gdown_bin <- Sys.getenv("GDOWN_BIN", unset = "/opt/gdown/bin/gdown")
   if (!file.exists(gdown_bin)) {
-    stop_dem(
-      "El mecanismo de descarga robusta del MDE no esta disponible en el contenedor.",
-      503
-    )
+    stop_dem("El mecanismo gdown no esta disponible en el contenedor.", 503)
   }
 
   remote_url <- get_remote_url()
@@ -88,10 +161,8 @@ download_remote_dem_cache <- function() {
 
   message(
     "/vsicurl/ no pudo abrir la URL directa del MDE. ",
-    "Se descargara EL MISMO archivo usando el file ID extraido de esa URL: ",
-    drive_id,
-    " | cache temporal: ",
-    dest
+    "Se intentara descargar EL MISMO archivo usando el file ID extraido de esa URL: ",
+    drive_id
   )
 
   cmd_out <- character()
@@ -118,14 +189,7 @@ download_remote_dem_cache <- function() {
 
     exit_status <- attr(cmd_out, "status")
     if (is.null(exit_status)) exit_status <- 0L
-
     if (exit_status == 0L && is_tiff_file(part)) break
-
-    message(
-      "Intento gdown ", attempt, "/3 no produjo aun un GeoTIFF completo. ",
-      "exit=", exit_status,
-      " | bytes=", if (file.exists(part)) file.info(part)$size else 0
-    )
   }
 
   if (exit_status != 0L || !is_tiff_file(part)) {
@@ -141,11 +205,9 @@ download_remote_dem_cache <- function() {
     stop_dem(
       paste0(
         "La URL directa del MDE no pudo resolverse como GeoTIFF desde Railway. ",
-        "Se uso el file ID extraido de la misma URL. ",
         "gdown exit=", exit_status,
         "; bytes recibidos=", size_part,
-        ". Detalle: ", tail_log,
-        ". Se mantiene exactamente la misma fuente remota configurada."
+        ". Detalle: ", tail_log
       ),
       503
     )
@@ -156,13 +218,6 @@ download_remote_dem_cache <- function() {
     stop_dem("No fue posible finalizar la cache temporal del MDE en el servidor.", 503)
   }
 
-  message(
-    "MDE remoto descargado correctamente desde el mismo archivo configurado. Cache: ",
-    dest,
-    " | bytes: ",
-    file.info(dest)$size
-  )
-
   dest
 }
 
@@ -171,7 +226,10 @@ source_label <- function(path) {
   if (identical(
     normalizePath(path, winslash = "/", mustWork = FALSE),
     normalizePath(get_remote_cache_path(), winslash = "/", mustWork = FALSE)
-  )) return("remote-downloaded-cache")
+  )) {
+    if (bucket_configured()) return("railway-bucket-cache")
+    return("remote-downloaded-cache")
+  }
   "local"
 }
 
@@ -189,6 +247,26 @@ get_dem <- function(force_local = FALSE) {
       }
       opened <- list(dem = open_dem_source(local_path), path = local_path)
     } else {
+      # Preferir Railway Bucket cuando este configurado y el objeto exista.
+      if (bucket_configured()) {
+        bucket_try <- tryCatch(
+          download_bucket_dem_cache(),
+          error = function(e) e
+        )
+
+        if (is.character(bucket_try) && file.exists(bucket_try)) {
+          opened <- list(dem = open_dem_source(bucket_try), path = bucket_try)
+          assign(cache_name, opened$dem, envir = .dem_cache)
+          assign(source_name, opened$path, envir = .dem_cache)
+          return(opened$dem)
+        }
+
+        warning(
+          "Railway Bucket configurado, pero el objeto DEM aun no esta disponible o no es valido. ",
+          if (inherits(bucket_try, "error")) conditionMessage(bucket_try) else ""
+        )
+      }
+
       opened <- tryCatch(
         list(dem = open_dem_source(remote_path), path = remote_path),
         error = function(e) {
@@ -200,19 +278,10 @@ get_dem <- function(force_local = FALSE) {
           )
 
           if (is.character(cached) && length(cached) == 1L && file.exists(cached)) {
-            warning(
-              "No fue posible abrir el DEM por /vsicurl/. Se usara una copia temporal ",
-              "del MISMO GeoTIFF descargado usando el file ID de la URL directa configurada. ",
-              "Detalle /vsicurl/: ", remote_error
-            )
             return(list(dem = open_dem_source(cached), path = cached))
           }
 
           if (nzchar(local_path)) {
-            warning(
-              "No fue posible abrir ni descargar el DEM remoto. Se usara el respaldo local. Detalle: ",
-              remote_error
-            )
             return(list(dem = open_dem_source(local_path), path = local_path))
           }
 
@@ -224,9 +293,9 @@ get_dem <- function(force_local = FALSE) {
 
           stop_dem(
             paste0(
-              "El servicio no pudo abrir el MDE por lectura remota ni descargar una copia temporal ",
-              "del mismo archivo configurado. Detalle /vsicurl/: ", remote_error,
-              ". Detalle de cache: ", cache_detail
+              "El MDE no esta disponible en Railway Bucket y la URL remota tampoco pudo abrirse. ",
+              "Detalle /vsicurl/: ", remote_error,
+              ". Detalle de fallback: ", cache_detail
             ),
             503
           )
@@ -240,4 +309,4 @@ get_dem <- function(force_local = FALSE) {
 
   get(cache_name, envir = .dem_cache, inherits = FALSE)
 }
-# --- end Cloud fallback v0.5.5 -----------------------------------------------
+# --- end Cloud storage v0.5.6 -----------------------------------------------
