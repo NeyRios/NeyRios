@@ -1,8 +1,10 @@
-# --- Cloud fallback v0.5.2 ----------------------------------------------------
-# Conserva la URL remota activa. Si GDAL /vsicurl/ no puede leerla por rangos,
-# descarga el MISMO GeoTIFF a almacenamiento efimero del contenedor y reutiliza
-# esa copia mientras la instancia siga viva.
-APP_VERSION <- "0.5.2"
+# --- Cloud fallback v0.5.3 ----------------------------------------------------
+# Conserva EXACTAMENTE la URL remota activa del DEM.
+# 1) Intenta lectura aleatoria GDAL /vsicurl/.
+# 2) Si la URL entrega una pagina HTML/intersticial a GDAL, usa gdown sobre
+#    LA MISMA URL directa para resolver la descarga del mismo archivo.
+# 3) Guarda el GeoTIFF en cache efimera del contenedor y lo reutiliza.
+APP_VERSION <- "0.5.3"
 
 get_remote_cache_path <- function() {
   cache_dir <- trimws(Sys.getenv(
@@ -35,7 +37,7 @@ download_remote_dem_cache <- function() {
   acquired <- dir.create(lock_dir, recursive = FALSE, showWarnings = FALSE)
 
   if (!acquired) {
-    deadline <- Sys.time() + 900
+    deadline <- Sys.time() + 1800
     while (Sys.time() < deadline) {
       if (is_tiff_file(dest)) return(dest)
       Sys.sleep(2)
@@ -47,40 +49,62 @@ download_remote_dem_cache <- function() {
   }
 
   on.exit(unlink(lock_dir, recursive = TRUE, force = TRUE), add = TRUE)
+
   part <- paste0(dest, ".part")
   unlink(part, force = TRUE)
 
-  old_timeout <- getOption("timeout")
-  on.exit(options(timeout = old_timeout), add = TRUE)
-  timeout_value <- suppressWarnings(as.numeric(old_timeout))
-  if (!length(timeout_value) || !is.finite(timeout_value)) timeout_value <- 60
-  options(timeout = max(3600, timeout_value))
+  gdown_bin <- Sys.getenv("GDOWN_BIN", unset = "/opt/gdown/bin/gdown")
+  if (!file.exists(gdown_bin)) {
+    stop_dem(
+      "El mecanismo de descarga robusta del MDE no esta disponible en el contenedor.",
+      503
+    )
+  }
 
   message(
-    "/vsicurl/ no pudo abrir el MDE; descargando la misma URL remota a cache temporal: ",
+    "/vsicurl/ no pudo abrir la URL directa del MDE. ",
+    "Se intentara descargar EL MISMO archivo con gdown a cache temporal: ",
     dest
   )
 
-  ok <- tryCatch({
-    utils::download.file(
-      url = get_remote_url(),
-      destfile = part,
-      mode = "wb",
-      method = "libcurl",
-      quiet = FALSE
+  cmd_out <- tryCatch(
+    system2(
+      command = gdown_bin,
+      args = c(
+        "--fuzzy",
+        "--quiet",
+        "-O", shQuote(part),
+        shQuote(get_remote_url())
+      ),
+      stdout = TRUE,
+      stderr = TRUE
+    ),
+    error = function(e) structure(
+      paste("Error ejecutando gdown:", conditionMessage(e)),
+      status = 1L
     )
-    TRUE
-  }, error = function(e) {
-    warning("Fallo la descarga temporal del MDE: ", conditionMessage(e))
-    FALSE
-  })
+  )
 
-  if (!ok || !is_tiff_file(part)) {
+  exit_status <- attr(cmd_out, "status")
+  if (is.null(exit_status)) exit_status <- 0L
+
+  if (exit_status != 0L || !is_tiff_file(part)) {
+    size_part <- if (file.exists(part)) file.info(part)$size else 0
+    tail_log <- if (length(cmd_out)) {
+      paste(tail(cmd_out, 8), collapse = " | ")
+    } else {
+      "sin salida adicional"
+    }
+
     unlink(part, force = TRUE)
+
     stop_dem(
       paste0(
-        "La URL remota del MDE respondio, pero no entrego un GeoTIFF valido para la cache temporal. ",
-        "Se mantiene la misma fuente remota configurada."
+        "La URL directa del MDE no pudo resolverse como GeoTIFF desde Railway. ",
+        "gdown exit=", exit_status,
+        "; bytes recibidos=", size_part,
+        ". Detalle: ", tail_log,
+        ". Se mantiene exactamente la misma URL remota configurada."
       ),
       503
     )
@@ -90,6 +114,13 @@ download_remote_dem_cache <- function() {
     unlink(part, force = TRUE)
     stop_dem("No fue posible finalizar la cache temporal del MDE en el servidor.", 503)
   }
+
+  message(
+    "MDE remoto descargado correctamente desde la URL directa configurada. Cache: ",
+    dest,
+    " | bytes: ",
+    file.info(dest)$size
+  )
 
   dest
 }
@@ -130,8 +161,8 @@ get_dem <- function(force_local = FALSE) {
           if (is.character(cached) && length(cached) == 1L && file.exists(cached)) {
             warning(
               "No fue posible abrir el DEM por /vsicurl/. Se usara una copia temporal ",
-              "descargada desde la misma URL remota. Detalle /vsicurl/: ",
-              remote_error
+              "del MISMO GeoTIFF descargado desde la URL directa configurada. ",
+              "Detalle /vsicurl/: ", remote_error
             )
             return(list(dem = open_dem_source(cached), path = cached))
           }
@@ -153,7 +184,7 @@ get_dem <- function(force_local = FALSE) {
           stop_dem(
             paste0(
               "El servicio no pudo abrir el MDE por lectura remota ni descargar una copia temporal ",
-              "desde la misma URL configurada. Detalle /vsicurl/: ", remote_error,
+              "desde la misma URL directa configurada. Detalle /vsicurl/: ", remote_error,
               ". Detalle de cache: ", cache_detail
             ),
             503
@@ -168,4 +199,4 @@ get_dem <- function(force_local = FALSE) {
 
   get(cache_name, envir = .dem_cache, inherits = FALSE)
 }
-# --- end Cloud fallback v0.5.2 -----------------------------------------------
+# --- end Cloud fallback v0.5.3 -----------------------------------------------
