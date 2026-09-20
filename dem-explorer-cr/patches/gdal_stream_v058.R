@@ -2,7 +2,7 @@
 # Sustituye los recortes/máscaras de resolución completa de terra por gdalwarp
 # con memoria acotada. El GeoTIFF científico permanece a 10 m, EPSG:5367 y
 # alineado a la malla del DEM IGN original.
-APP_VERSION <- "0.5.8"
+APP_VERSION <- "0.5.10"
 
 .gdalwarp_bin <- Sys.getenv("GDALWARP_BIN", unset = "/usr/bin/gdalwarp")
 
@@ -98,7 +98,10 @@ gdal_clip_to_polygon <- function(
     format(rr[1], scientific = FALSE, trim = TRUE, digits = 16),
     format(rr[2], scientific = FALSE, trim = TRUE, digits = 16),
     "-r", "near",
-    "-srcnodata", "nan",
+    # El MDE IGN usa un valor de relleno Float32 cercano a 3.4e38 en zonas
+    # sin datos (p. ej. mar). Debe convertirse a NA; de lo contrario sesga
+    # max, media, sd y mediana.
+    "-srcnodata", "3.4e38",
     "-dstnodata", "nan",
     "-ot", "Float32",
     "-co", "TILED=YES",
