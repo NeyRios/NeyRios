@@ -1,8 +1,8 @@
 FROM rocker/geospatial:latest
 
-RUN apt-get update &&     apt-get install -y --no-install-recommends unzip coreutils &&     rm -rf /var/lib/apt/lists/*
+RUN apt-get update &&     apt-get install -y --no-install-recommends       unzip       coreutils       libsodium-dev &&     rm -rf /var/lib/apt/lists/*
 
-RUN R -q -e "install.packages(c('plumber','jsonlite','png'), repos='https://cloud.r-project.org')"
+RUN R -q -e "install.packages(c('sodium','plumber','jsonlite','png'), repos='https://cloud.r-project.org'); stopifnot(requireNamespace('sodium', quietly=TRUE), requireNamespace('plumber', quietly=TRUE), requireNamespace('jsonlite', quietly=TRUE), requireNamespace('png', quietly=TRUE))"
 
 WORKDIR /src
 COPY dem-explorer-cr/archive /src/archive
