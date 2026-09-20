@@ -4,7 +4,7 @@
 # 2) Si la URL entrega una pagina HTML/intersticial a GDAL, usa gdown sobre
 #    LA MISMA URL directa para resolver la descarga del mismo archivo.
 # 3) Guarda el GeoTIFF en cache efimera del contenedor y lo reutiliza.
-APP_VERSION <- "0.5.3"
+APP_VERSION <- "0.5.4"
 
 get_remote_cache_path <- function() {
   cache_dir <- trimws(Sys.getenv(
@@ -71,7 +71,6 @@ download_remote_dem_cache <- function() {
     system2(
       command = gdown_bin,
       args = c(
-        "--fuzzy",
         "--quiet",
         "-O", shQuote(part),
         shQuote(get_remote_url())
