@@ -1,8 +1,11 @@
-# --- Statistics compatibility v0.5.9 -----------------------------------------
-# Evita el paso indirecto de `fun` a terra::global(), que en la version de
-# terra del contenedor puede ser evaluado como simbolo y producir:
-# "could not find function \"fun\"".
-APP_VERSION <- "0.5.9"
+# --- Statistics compatibility v0.5.10 ----------------------------------------
+# Compatible con la version de terra del contenedor:
+# - estadisticos simples: una llamada explicita por funcion
+# - mediana: se pasa stats::median como objeto funcion, evitando el nombre
+#   "median" que en esta version termina evaluado como "fun".
+# Tambien valida rangos fisicamente plausibles para detectar valores NODATA
+# Float32 (~3.4e38) que no hayan sido enmascarados.
+APP_VERSION <- "0.5.10"
 
 .compute_global_scalar <- function(x, stat_name) {
   out <- switch(
@@ -12,8 +15,16 @@ APP_VERSION <- "0.5.9"
     max = terra::global(x, "max", na.rm = TRUE),
     mean = terra::global(x, "mean", na.rm = TRUE),
     sd = terra::global(x, "sd", na.rm = TRUE),
-    median = terra::global(x, "median", na.rm = TRUE),
     stop(paste0("Estadistico no soportado: ", stat_name))
+  )
+  as.numeric(out[1, 1])
+}
+
+.compute_exact_median <- function(x) {
+  out <- terra::global(
+    x,
+    stats::median,
+    na.rm = TRUE
   )
   as.numeric(out[1, 1])
 }
@@ -38,6 +49,19 @@ compute_stats <- function(x, aoi_projected, buffer_m) {
   zmax <- .compute_global_scalar(x, "max")
   log_dem_stage("stats_max_done", paste0("max=", zmax))
 
+  # Control de integridad: evita publicar estadisticas contaminadas por
+  # valores de relleno Float32 del MDE.
+  if (!is.finite(zmin) || !is.finite(zmax) || zmin < -1000 || zmax > 10000) {
+    stop_dem(
+      paste0(
+        "El MDE recortado contiene valores de elevacion no validos (min=",
+        signif(zmin, 8), ", max=", signif(zmax, 8),
+        "). Probable valor NODATA sin enmascarar."
+      ),
+      503
+    )
+  }
+
   log_dem_stage("stats_mean_start")
   zmean <- .compute_global_scalar(x, "mean")
   log_dem_stage("stats_mean_done", paste0("mean=", zmean))
@@ -47,7 +71,7 @@ compute_stats <- function(x, aoi_projected, buffer_m) {
   log_dem_stage("stats_sd_done", paste0("sd=", zsd))
 
   log_dem_stage("stats_median_start")
-  q50 <- .compute_global_scalar(x, "median")
+  q50 <- .compute_exact_median(x)
   log_dem_stage("stats_median_done", paste0("median=", q50))
 
   n_total <- terra::ncell(x)
@@ -77,4 +101,4 @@ compute_stats <- function(x, aoi_projected, buffer_m) {
     stringsAsFactors = FALSE
   )
 }
-# --- end Statistics compatibility v0.5.9 -------------------------------------
+# --- end Statistics compatibility v0.5.10 -----------------------------------
